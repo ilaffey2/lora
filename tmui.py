@@ -7,11 +7,57 @@ import sys
 from typing import Dict, List
 import curses
 import collections
-import re
+import json
+import pathlib
 
 # Store historical channel utilization data
 HISTORY_LENGTH = 60  # Keep 60 minutes of history
 channel_history = collections.defaultdict(lambda: collections.deque(maxlen=HISTORY_LENGTH))
+
+# Store all seen nodes
+class NodeHistory:
+    def __init__(self, log_dir=None):
+        if log_dir is None:
+            log_dir = pathlib.Path.home() / '.tmui'
+        self.log_dir = pathlib.Path(log_dir)
+        self.log_dir.mkdir(exist_ok=True)
+        self.history_file = self.log_dir / 'node_history.json'
+        self.seen_nodes = self.load_history()
+        
+    def load_history(self) -> Dict:
+        if self.history_file.exists():
+            try:
+                with open(self.history_file, 'r') as f:
+                    return json.load(f)
+            except json.JSONDecodeError:
+                return {}
+        return {}
+        
+    def save_history(self):
+        with open(self.history_file, 'w') as f:
+            json.dump(self.seen_nodes, f, indent=2)
+            
+    def update_node(self, node: Dict):
+        node_id = node['id']
+        if node_id not in self.seen_nodes:
+            self.seen_nodes[node_id] = {
+                'first_seen': datetime.now().isoformat(),
+                'times_seen': 0,
+                'latest_info': {}
+            }
+        
+        self.seen_nodes[node_id]['times_seen'] += 1
+        self.seen_nodes[node_id]['last_seen'] = datetime.now().isoformat()
+        self.seen_nodes[node_id]['latest_info'] = node
+        self.save_history()
+        
+    def get_all_nodes(self) -> List[Dict]:
+        return [
+            {**info['latest_info'], 
+             'first_seen': info['first_seen'],
+             'times_seen': info['times_seen']}
+            for info in self.seen_nodes.values()
+        ]
 
 def parse_table_row(row: str) -> Dict:
     """Parse a single row of the meshtastic table output"""
@@ -130,6 +176,32 @@ def draw_graph(stdscr, start_y: int):
             
         stdscr.attroff(curses.color_pair(color))
 
+def draw_history_summary(stdscr, node_history: NodeHistory, start_y: int):
+    """Draw summary of historical node data"""
+    all_nodes = node_history.get_all_nodes()
+    if not all_nodes:
+        return
+        
+    stdscr.addstr(start_y, 0, "Node History:")
+    headers = ["User", "AKA", "Times Seen", "First Seen", "Last Seen"]
+    for i, header in enumerate(headers):
+        stdscr.addstr(start_y + 1, i * 20, f"{header:<19}")
+    
+    for idx, node in enumerate(all_nodes):
+        row = start_y + 2 + idx
+        first_seen = datetime.fromisoformat(node['first_seen']).strftime('%Y-%m-%d %H:%M')
+        last_seen = datetime.fromisoformat(node.get('last_seen', node['first_seen'])).strftime('%Y-%m-%d %H:%M')
+        
+        cols = [
+            node.get('user', 'N/A'),
+            node.get('aka', 'N/A'),
+            str(node.get('times_seen', 1)),
+            first_seen,
+            last_seen
+        ]
+        for i, col in enumerate(cols):
+            stdscr.addstr(row, i * 20, f"{col:<19}")
+
 def main(stdscr, host: str):
     # Setup colors
     curses.start_color()
@@ -140,6 +212,9 @@ def main(stdscr, host: str):
     # Hide cursor
     curses.curs_set(0)
     
+    # Initialize node history
+    node_history = NodeHistory()
+    
     while True:
         try:
             # Clear screen
@@ -148,14 +223,16 @@ def main(stdscr, host: str):
             # Get current nodes data
             nodes = run_meshtastic_command(host)
             
-            # Update history
+            # Update histories
             update_channel_history(nodes)
+            for node in nodes:
+                node_history.update_node(node)
             
             # Draw header
             stdscr.addstr(0, 0, f"tmui - Meshtastic Monitor - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
             stdscr.addstr(1, 0, "Press 'q' to quit")
             
-            # Draw node table
+            # Draw active nodes table
             table_start = 3
             headers = ["User", "AKA", "Hardware", "Battery", "Chan.Util", "SNR", "Since"]
             for i, header in enumerate(headers):
@@ -179,6 +256,10 @@ def main(stdscr, host: str):
             graph_start = table_start + len(nodes) + 2
             stdscr.addstr(graph_start, 0, "Channel Utilization History (last hour)")
             draw_graph(stdscr, graph_start + 1)
+            
+            # Draw node history
+            history_start = graph_start + 15  # After graph and legends
+            draw_history_summary(stdscr, node_history, history_start)
             
             # Refresh display
             stdscr.refresh()
