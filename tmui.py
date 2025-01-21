@@ -42,11 +42,16 @@ class NodeHistory:
         if node_id not in self.seen_nodes:
             self.seen_nodes[node_id] = {
                 'first_seen': datetime.now().isoformat(),
-                'times_seen': 0,
+                'times_seen': 1,
+                'last_heard': node['last_heard'],
                 'latest_info': {}
             }
+        else:
+            # Only increment times_seen if LastHeard has changed
+            if node['last_heard'] != self.seen_nodes[node_id].get('last_heard'):
+                self.seen_nodes[node_id]['times_seen'] += 1
+                self.seen_nodes[node_id]['last_heard'] = node['last_heard']
         
-        self.seen_nodes[node_id]['times_seen'] += 1
         self.seen_nodes[node_id]['last_seen'] = datetime.now().isoformat()
         self.seen_nodes[node_id]['latest_info'] = node
         self.save_history()
